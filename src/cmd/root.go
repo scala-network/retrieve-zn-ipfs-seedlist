@@ -6,13 +6,20 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
+	"time"
 
+	"github.com/G1itchZero/ZeroGo/site_manager"
+	"github.com/G1itchZero/ZeroGo/utils"
+	log "github.com/Sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
 // workingDir is the path we're executing from
 var workingDir string
+var localNet bool
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -43,7 +50,24 @@ from ZeroNet/IPFS for the Stellite daemon to use instead of the hardcoded ones.
 		// Clear all the spaces
 		fmt.Println("")
 
-		ipfsAddress := "https://ipfs.io/ipfs/QmctxmwEvU7oXwydATLLM5iScm1vXRtvwep9KY6KzxtT6V"
+		zeronetAddress := "1FAiQ7MddvavaRF6b47fPEY4nSBVJUbCXf"
+		if localNet {
+			zeronetAddress = "133gv4M9kx5oWP1yUkK9MRFSnEVQZAghmt"
+		}
+
+		fmt.Println("Retrieving IPFS hash from ZeroNet address", zeronetAddress)
+
+		ipfsHash, err := getIPFSHash(zeronetAddress)
+		if err != nil {
+			fmt.Printf("Unable to get IPFS hash from ZeroNet: %s\n", err)
+			fmt.Print("Press enter to continue...")
+			_, _ = bufio.NewReader(os.Stdin).ReadBytes('\n')
+			os.Exit(0)
+		}
+		// HACK: Pause here to wait for the zeronet lib to complete its output
+		// TODO: Should actually be fixed in ZeroGo library itself
+		time.Sleep(time.Second * 2)
+		ipfsAddress := fmt.Sprintf("https://ipfs.io/ipfs/%s", string(ipfsHash))
 		fmt.Printf("Downloading seedlist from IPFS at '%s'\n", ipfsAddress)
 
 		response, err := http.Get(ipfsAddress)
@@ -73,6 +97,14 @@ from ZeroNet/IPFS for the Stellite daemon to use instead of the hardcoded ones.
 
 		fmt.Printf("\nSeedlist saved to '%s'\n", seedlistPath)
 		fmt.Println("You can start the Stellite daemon now.")
+
+		// Cleanup
+		err = os.RemoveAll(utils.GetDataPath())
+		if err != nil {
+			fmt.Println(
+				"Warning: unable to remove temporary ZeroNet data directory:",
+				err)
+		}
 
 		fmt.Print("\nPress enter to continue...")
 		_, _ = bufio.NewReader(os.Stdin).ReadBytes('\n')
@@ -104,4 +136,39 @@ func init() {
 	}
 	workingDir = filepath.Dir(workingDir)
 
+	rootCmd.PersistentFlags().BoolVar(&localNet, "testnet", false, "retrieve testnet seedlist")
+}
+
+// getIPFSHash retrieves the IPFS hash from ZeroNet
+func getIPFSHash(zeronetAddress string) (string, error) {
+
+	os.MkdirAll(utils.GetDataPath(), 0777)
+	utils.CreateCerts()
+	log.SetLevel(log.ErrorLevel)
+
+	// If the site has been downloaded, remove and grab the latest version
+	sitePath := path.Join(utils.GetDataPath(), zeronetAddress)
+	exists, err := utils.Exists(sitePath)
+	if err != nil {
+		return "", err
+	}
+	if exists {
+		err = os.RemoveAll(sitePath)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	siteManager := site_manager.NewSiteManager()
+	site := siteManager.Get(zeronetAddress)
+	site.Wait()
+	// The IPFS hash is stored in the file ipfs.hash
+	ipfsHashBytes, err := site.GetFile("ipfs.hash")
+	if err != nil {
+		return "", err
+	}
+	ipfsHash := string(ipfsHashBytes)
+	ipfsHash = strings.TrimSpace(ipfsHash)
+
+	return ipfsHash, nil
 }
